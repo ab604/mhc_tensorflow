@@ -1,0 +1,611 @@
+---
+title: "Machine Learning for MHC I peptide classification"
+author: "Alistair Bailey"
+date: "1st May 2018"
+output:
+  prettydoc::html_pretty:
+    toc: true
+    theme: architect
+    highlight: github
+    df_print: paged
+    
+subtitle: Using the R interface to Keras / TensorFlow
+---
+
+# Overview
+
+This notebook is based upon a blog post by Leon Eyrich Jessen: 
+https://tensorflow.rstudio.com/blog/dl-for-cancer-immunotherapy.html 
+
+Leon's blog shows how to build a deep learning model that classifies the strength of
+binding of different peptides to a single MHC I allotype (HLA-A*02:01).
+
+Machine learning in general attempts to find transformations of input data into more
+useful representations of that data to solve a problem. 
+
+Deep learning does this by successive data transformations via layers, the depth 
+referring to the number of layers of transformations, not the extent of insight gained.
+
+This layered approach is sometimes referred to as a neural network, however as
+François Chollet, one of the authors of [Deep Learning with R](https://www.manning.com/books/deep-learning-with-r) tweeted:
+
+![](img/f_chollet_nerural_networks_tweet.PNG)
+
+Here I present a variation on Leon's theme after I was kindly invited to present
+at the Computational Biology Club Meeting at the University of Southampton on
+April 25th 2018.
+
+I took the invitation as an opportunity to learn a bit more about how peptide
+prediction tools such as [NetMHC](http://www.cbs.dtu.dk/services/NetMHC/) work.
+
+What follows is a toy model that attempts to classify peptides from my some of my
+experiments according to one of five MHC class I allotypes present in the cells I
+use.
+
+The repository with all the code and datasets is here:
+https://github.com/ab604/mhc_tensorflow
+
+## Some background
+
+MHC I allotypes (allo means other) refers to proteins expressed by the most diverse 
+gene in the human genome. We each have up to six MHC I gene variants, or alleles, 
+depending upon those carried by our parents and therefore almost all our cells
+express up to six MHC I allotype proteins: Two A, two B and two C allotypes.
+
+MHC I proteins have evolved to sample fragments of other
+proteins from the complement of proteins inside our cells and present them to our
+immune system at the cell surface. These small fragments are called peptides and 
+in MHC I processing, the predominant length of a peptide
+MHC I selects is 9 amino acids.
+
+Pamela Bjorkman solved the first MHC I structure in 1987 and the peptide can 
+be seen bound in the picture below in red.
+
+![](img/bjorkman_1987.png)
+
+Thousands of MHC I molecules continuously select and bind peptides, presenting them
+at the cell surface as way of communicating to our immune system what is going on
+inside our cells. This is called antigen processing and presentation.
+
+If a cell is healthy, the MHC I molecules and peptides presented mean that
+the immune system does nothing. But if a virus infects our cells, or if a tumour
+develops, then the peptides presented may include those derived from viral or 
+tumour specific proteins and the immune system will attack and kill these cells.
+
+A more detailed graphical description of our current understanding is show below:
+
+![**MHC I antigen processing, doi: 10.12688/f1000research.10474.1**](img/antigen_processing_2017.png)
+
+In circumstances where the immune system is unable to clear disease, 
+the identification of peptides associated with both
+a strong immune response and specific MHC I allotypes would be 
+of great use in creating vaccines that could paint diseased cells as targets.
+
+However the methods we use to observe peptides and MHC I molecules experimentally
+means that the MHC I molecules and their peptides become separated and
+we don't easily know how to match peptides to their MHC I allotypes. Hence I have
+used deep learning to try and classify the peptides according to which allotypes
+they bind.
+
+## Key takeaways
+
++ The greatest amount of work is in obtaining and tidying a development dataset.
++ Machine Learning can be deployed from R or Python using the Keras API with minimal code (20 lines or so)
++ Modelling complements and informs judgement. It is not an alternative to it. (This probably should go without saying, but anecdotally I notice colleagues requesting a black box where
+data goes in and concrete answers come out.)
+
+## Additional resources I used for this notebook 
+
+J.J. Allaire & François Chollet : https://www.manning.com/books/deep-learning-with-r
+
+Leon Eyrich Jessen : https://tensorflow.rstudio.com/blog/dl-for-cancer-immunotherapy.html 
+
+R Keras : https://keras.rstudio.com/ 
+
+Python Keras : https://keras.io/ 
+
+TensorFlow : https://www.tensorflow.org/ 
+
+Andrew Ng : https://www.coursera.org/learn/machine-learning
+
+Datacamp : https://www.datacamp.com/tracks/machine-learning 
+
+Rmarkdown : https://rmarkdown.rstudio.com
+
+# Allotype classification model
+
+As this is a supervised learning approach, I first needed some data with which
+to train the model. As I'm fortunate to work in with human cell lines there is
+a curated database of experimentally derived peptides called the [immune epitope
+database](http://www.iedb.org/) (IEDB). Full details on the curation methodology 
+can be found [here](http://curationwiki.iedb.org/wiki/index.php/Curation_Manual2.0).
+
+In humans the nomenclature for MHC I allotypes begins with the acronym HLA, and
+as I mentioned earlier we can have two A, two B and two C HLA types in our cells.
+I know from our own HLA typing of the cells I sue that there are HLA-A\*31 homozygous
+(meaning both A genes are the same), HLA-B\*40 and HLA-B\*51, and HLA-C\*03 and
+HLA-C\*15.
+
+Hence I needed to obtain identified peptides for these five allotypes from the
+IEDB as training data.
+
+## Obtaining the IEDB peptide data
+
+Peptide data can be downloaded most simply by using there web interface, although
+the current database can also be exported as a [SQL database](http://www.iedb.org/database_export_v3.php) for use too.
+
+Here I used the web interface and for each allotype I entered the allotype of 
+interest into the MHC restriction box as shown in the image below.
+
+![**Choosing a MHC allotype**](../R/img/iedb_interface.PNG)
+
+I then exported the results as CSV files into my data directory:
+
+![**Downloading the peptides**](../R/img/iedb_download.PNG)
+
+## Setting up R
+
+As per [Leon's prerequisites](https://tensorflow.rstudio.com/blog/dl-for-cancer-immunotherapy.html#prerequisites) I installed and set-up Keras and the associated tools I need.
+I also set a seed for reproducibility of results.
+
+```{r,set-up, message=FALSE, warning=FALSE}
+#install.packages("devtools")
+#devtools::install_github("leonjessen/PepTools")
+#devtools::install_github("omarwagih/ggseqlogo")
+# Load packages
+library(keras)
+library(tidyverse)
+library(PepTools)
+library(janitor)
+set.seed(1458) # Set seed for reproducibility
+```
+
+
+## Tidying the IEDB data 
+
+After a bit of manual inspection of the CSV files I wrote a small function for
+reading and tidying each file. 
+
+It's a bit messy but essentially it skips the 
+header, takes out only the peptide, adds some new variable labels we need,
+removes unwanted characters from the peptide sequence, and filters the rows for 
+peptides of only 9 amino acids in length.
+
+The new labels are characters and integer values for the allotypes.
+
+```{r, iedb_data_function}
+## Function to tidy iedb peptide data
+## Takes in file_path to csv file and MHC I allotype name label and number
+tidy_peptides <- function(file_path,allotype,allotype_num) {
+  
+  tidy_dat <- read_csv(file_path, skip = 1, col_types = cols()) %>% 
+    # Filter peptide rows
+    filter(!str_detect(Description,"[lX]") & 
+             `Object Type` == "Linear peptide") %>% 
+    # Add new variables
+    mutate(length = str_count(Description), # Add length
+         label_chr = allotype, # Label allotype
+         label_num = allotype_num, # Add integer for allotype 
+         # Remove any extras strings
+         peptide = str_replace_all(Description,"\\(.*?\\)", "")) %>% 
+    # Filter only 9mers
+    filter(length == 9 ) %>% 
+    # Keep only the peptide and labels
+    select(peptide, label_chr, label_num) 
+  
+  return(tidy_dat)
+}
+```
+
+I then use the function like so to read in the individual allotype data,
+and then bind it into a single data set.
+
+```{r, read_data, message=FALSE, warning=FALSE}
+# Load and tidy the data for five MHC I allotypes
+a31_train <- tidy_peptides("../data/iedb/iedb_a31_peptides.csv","A31",0L)
+b40_train <- tidy_peptides("../data/iedb/iedb_b40_peptides.csv", "B40", 1L)
+b51_train <- tidy_peptides("../data/iedb/iedb_b51_peptides.csv", "B51", 2L)
+c03_train <- tidy_peptides("../data/iedb/iedb_c03_peptides.csv", "C03", 3L)
+c15_train <- tidy_peptides("../data/iedb/iedb_c15_peptides.csv", "C15", 4L)
+
+# Bind into a single tibble and label as training data
+iedb_peps <- bind_rows(a31_train,b40_train,b51_train,c03_train,c15_train)
+
+# Look at a sample of 20
+iedb_peps %>% sample_n(20)
+```
+
+To avoid bias from having peptide groups of different sizes for each allotype
+I sampled 1000 for each allotype to create a regularised data set.
+```{r, regularise_data}
+# Count the number of peptides for each allotype
+iedb_peps %>% group_by(label_chr) %>% tally()
+
+# Balance the dataset by sampling 1000 peptides for each allotype
+iedb_peps_reg <- iedb_peps %>% group_by(label_chr) %>% sample_n(1000)
+
+# Check the number of peptides again 
+iedb_peps_reg %>% group_by(label_chr) %>% tally()
+
+# Look at a sample of 20
+iedb_peps_reg %>% ungroup() %>% sample_n(20)
+```
+
+## Split the IEDB data into training and test sets
+
+Having tidied the IEDB data, I next split it into 80% training and 20% test data
+like so:
+```{r, split_data}
+# Take 80% of subset of iedp peptides for training
+smp_size <- floor(0.80 * nrow(iedb_peps_reg)) # Find sample size
+train_idx <- sample(seq_len(nrow(iedb_peps_reg)), smp_size) # Get indices
+# Subset data and label as training
+peps_train <- iedb_peps_reg[train_idx,] %>% 
+  mutate(data_type = "train")
+
+# Extract the other 20% using the inverse of the index for the testing
+peps_test <- iedb_peps_reg[-train_idx,] %>% 
+  mutate(data_type = "test")
+
+# Bind into one data set
+pep_dat <- bind_rows(peps_train,peps_test)
+# Check the the numbers of peptides
+pep_dat %>% group_by(label_chr, data_type) %>% tally()
+
+# Look at a sample of pep_dat
+pep_dat %>% ungroup() %>% sample_n(10)
+```
+
+## Encoding the peptides
+
+[Where did the BLOSUM62 alignment score matrix come from?](https://www.nature.com/articles/nbt0804-1035)
+The linked paper gives a detailed explanation, but the aim of BLOSUM62 matrix is to 
+discover if protein sequences are related or not by creating a score that reflects 
+that.
+
+By observing lots of protein sequences the expected frequencies of each
+amino acid can be obtained. Given these sequences, a matrix of 20 amino acids 
+by 20 amino acids can be created with elements containing the log odds ratio of each amino acid combination in terms of the ratio of the observed amino and the expected
+frequency.
+
+This score then is a numerical way of thinking about the biochemical similarity 
+between amino acids and therefore the likelihood of substituting one amino acid
+for another at any position a protein sequence.
+
+Using the BLOSUM62 matrix enables the encoding the peptides as a way of
+generalising each peptide sequence from its specific sequence to a general sequence 
+such that for example, a leucine (L) is scored as similar to isoleucine (I) and 
+dissimilar to a lysine (K). This generalisation enables the algorithm to classify 
+similar peptides more easily. 
+
+This approach first was described in one of the key papers describing [NetMHC](http://www.cbs.dtu.dk/services/NetMHC/) :
+
+Reliable prediction of T-cell epitopes using neural networks with novel sequence representations.
+Nielsen M, Lundegaard C, Worning P, Lauemoller SL, Lamberth K, Buus S, Brunak S, Lund O.
+Protein Sci., (2003) 12:1007-17
+
+PubMed: [12717023](http://www.ncbi.nlm.nih.gov/entrez/query.fcgi?cmd=Retrieve&db=PubMed&list_uids=12717023&dopt=Abstract) 
+
+Using the [PepTools package](https://github.com/leonjessen/PepTools), in practice 
+each amino acid in the peptide sequence is transformed into a 2D tensor of 
+9 X 20 integers, and all the training peptides together form a 3D tensor 
+comprised of 4000 2D tensors.
+
+There is a cost here of more computation, or of learning unwanted patterns.
+
+Below is an example of an encoded peptide with the peptide sequence on the y-axis,
+the standard amino acid alphabet on x-axis and the score representing the likelihood
+of switching the peptide amino acid to different amino acid in the alphabet represented
+by the shading.
+
+```{r, peptide_tensor, echo=FALSE}
+pep_dat %>% ungroup() %>% sample_n(1) %>% pull(peptide) %>% pep_plot_images
+```
+
+## Transform data for Keras/TensorFlow model
+
+Following the encoding procedure described in the previous section, the peptide
+data is prepared as per [Leon's method](https://tensorflow.rstudio.com/blog/dl-for-cancer-immunotherapy.html#data-preparation). 
+
+The things to note in the code here is that the training and test data are
+both prepared as arrays. The input shape of 180 is given by the encoding of 9 amino 
+acid peptides in terms of the 20 amino acid alphabet, whilst I am aiming to 
+classify five MHC allotypes.
+
+During training, the training data is split again into training and validation
+targets. This is how the model learns as it iterates through the input data multiple
+times to fit the model parameters.
+
+```{r, prep_training_data}
+# Input shape: 9 peptides x 20 amino acids = 180
+input_shape <- 180
+# Output classes : 5 MHC I allotypes
+num_classes <- 5
+
+# Setup training data
+target  <-'train'
+x_train <- pep_dat %>% filter(data_type==target) %>% pull(peptide) %>% pep_encode
+y_train <- pep_dat %>% filter(data_type==target) %>% pull(label_num) %>% array
+
+# Setup test data
+target <- 'test'
+x_test <- pep_dat %>% filter(data_type==target) %>% pull(peptide) %>% pep_encode
+y_test <- pep_dat %>% filter(data_type==target) %>% pull(label_num) %>% array
+
+# Reshape into arrays
+x_train <- array_reshape(x_train, c(nrow(x_train), input_shape))
+x_test  <- array_reshape(x_test,  c(nrow(x_test),  input_shape))
+y_train <- to_categorical(y_train, num_classes)
+y_test  <- to_categorical(y_test,  num_classes)
+```
+
+## Define the model
+
+The Keras framework provides a way to build and implement deep learning models
+with minimal code given the data preparation. TensorFlow is the numerical library
+for perfomring the calculations (other libraries can be used with Keras).
+
+As I'm creating a classification model I need to define a `keras_model_sequential()`,
+to which the layers are added.
+
+Just like being in the lab, it all gets a bit empirical at this point and there aren't
+clear rules as to how many layers to use, but I adopted the "start simple" approach
+and used [Leon's model](https://tensorflow.rstudio.com/blog/dl-for-cancer-immunotherapy.html#defining-the-model) following [a bit of reading](https://www.manning.com/books/deep-learning-with-r) 
+about activation functions and how to avoid over-fitting using dropout layers.
+
+The danger of over-fitting is that the model will perform well on the training
+data and then poorly on data the model has never seen.
+
+What the model is ultimately trying to do is fit the 49,325 parameters that will 
+transform the encoded peptide sequences successfully into the five MHC allotype
+classes to which they belong.
+
+Using Keras we only need this much code to define the model:
+
+```{r, model_settings}
+# relu activation : function for performing non-linear transformations 
+# expanding hypothesis space.
+# Dropout layer : helps deal with overfitting. Drops features from output layer.
+
+# Initialize sequential model
+model <- keras_model_sequential() 
+
+# Build architecture
+model %>% 
+  layer_dense(units  = 180, activation = 'relu', input_shape = 180) %>% 
+  layer_dropout(rate = 0.4) %>% 
+  layer_dense(units  = 90, activation  = 'relu') %>%
+  layer_dropout(rate = 0.3) %>%
+  layer_dense(units  = 5, activation   = 'softmax') # Return probability scores
+                                                    # for each class
+
+# Look at the model structure
+model
+```
+
+## Compile and train the model
+
+Having defined the model we next compile it by defining how the algorithm 
+measures the difference between the input data and the validation targets in each iteration 
+(the `loss`),how the parameters are optimized, and how success in each iteration is measured:
+
+```{r, compile_model}
+# Compile model
+model %>% compile(
+  loss      = 'categorical_crossentropy', # Feedback loss function, distance.
+  optimizer = optimizer_rmsprop(),        # Gradient descent rules
+  metrics   = c('accuracy'))           # How often we match the target
+```
+
+Then we train the model, saving the output to `history`, by feeding the training
+data set 10 times (`epochs`) through the model in batches of 80 peptides at a time,
+keeping 20% for validation targets to assess the fit.
+
+```{r,training}
+# Train the model
+history <- model %>% fit(
+  x_train, y_train, 
+  epochs           = 10,   # 10 iterations over all training data
+  batch_size       = 80,   # 80 peptides per batch
+  validation_split = 0.2)  # Use 20% of training data for validation targets
+```
+
+Plotting the `history` we can see why I chose 10 epochs. The `loss` between 
+training and has reached a minimum, and the accuracy is in danger of over-fitting
+in further iterations as the training accuracy overtakes the validation accuracy.
+
+I've achieved about 90% accuracy in classifying these peptides in training.
+
+```{r, plot_history}
+plot(history)
+```
+
+## Evaluation of the model using the IEDB test set
+
+Now I use the test data, which the model hasn't seen before, to evaluate 
+the performance using [Leon's code.](https://tensorflow.rstudio.com/blog/dl-for-cancer-immunotherapy.html#training-and-evaluation)
+
+Here we can see that the model achieves over 90% accuracy at classifying which
+allotype the test peptides belong to.
+
+```{r, plot_performance}
+# Leon's code for plotting performance
+perf    <-  model %>% evaluate(x_test, y_test)
+acc     <-  perf$acc %>% round(3) * 100
+y_pred  <-  model %>% predict_classes(x_test)
+y_real  <-  y_test %>% apply(1,function(x){ return( which(x==1) - 1) })
+results <-  tibble(y_real  = y_real %>% factor,
+                 y_pred  = y_pred %>% factor,
+                 Correct = ifelse(y_real == y_pred,"yes","no") %>% factor)
+
+title = 'Performance on IEDB unseen data'
+xlab  = 'Measured (Class, as observed in IEDB)'
+ylab  = 'Predicted (Class assigned by Keras/TensorFlow)'
+results %>%
+  ggplot(aes(x = y_pred, y = y_real, colour = Correct)) +
+  geom_point() +
+  ggtitle(label = title, subtitle = paste0("Accuracy = ", acc,"%")) +
+  xlab(xlab) +
+  ylab(ylab) +
+  scale_color_manual(labels = c('No', 'Yes'),
+                     values = c('tomato','cornflowerblue')) +
+  geom_jitter() +
+  theme_bw()
+```
+
+## Comparison of predictions for my experimental data 
+
+I'm excluding much of the code here, but I wanted to then see how this toy
+model compared to [NetMHC](http://www.cbs.dtu.dk/services/NetMHC/) the most widely
+used peptide prediction server.
+
+NetMHC seeks to predict the binding affinity of peptides *to a given allotype or
+allotypes*. So unlike my model the user decides which allotype(s) the peptides are to
+be tested against.
+
+I took 1,000 peptides that I'd isolated in the lab using proteomics methods and
+used NetMHC to predict whether they'd bind or not to any of the five MHC allotypes
+in my cell line. I used the rank cut-off of 2% for a predicted binder and in this
+way classified the peptides according to allotype in terms of whether they were
+predicted to bind or not.
+
+The same 1,000 peptides were encoded as for the training data as `h_dat`and the model
+used to predict their allotypes:
+
+```{r,exp_predict,eval=FALSE}
+model %>% predict_classes(h_dat)
+```
+
+I then merged the model and NetMHC predictions to compare their classification
+of my peptides.
+
+```{r, validation_peps, include=FALSE}
+# Read in the and NetMHC peptides
+validation_peps <- read_csv("../data/validation_peps.csv",
+                            col_types = cols())
+```
+
+In the plot below, the model MHC allotype classification is on the x-axis and the NetMHC
+classification is on the y-axis. There is an additional class to my model of "NB"
+where NetMHC predicts no binding of the peptide as opposed to a different allotype.
+
+```{r, plot_validation_peps}
+validation_peps %>%
+  ggplot(aes(x = label_chr.x, y = label_chr.y, colour = Match)) +
+  geom_point() +
+  xlab("Model") +
+  ylab("NetMHC") +
+  scale_color_manual(values = c('red','blue')) +
+  geom_jitter() +
+  theme_bw()
+```
+
+The data can also be represented in a table and corresponding with the figure,
+we can see that both predictions agree well for some allotypes i.e. HLA-A\*31,
+but less well for others i.e. HLA-C\*03.
+
+Why might this be?
+
+```{r, hacat_table}
+# Compare peptide predictions between model and NetMHC
+validation_peps %>%  
+  group_by(label_chr.x, label_chr.y) %>% 
+  summarise(N_peptides = n()) %>% 
+  mutate(Percent = round(N_peptides/sum(N_peptides)*100, 1)) %>% 
+  arrange(desc(Percent)) %>% 
+  select(Model = label_chr.x,NetMHC = label_chr.y, N_peptides, Percent)
+```
+
+## Why might the Deep Learning model struggle?
+
+It could be argued that a Deep Learning model might be inappropriate for this 
+problem. We've encoded the peptides into a general form using BLOSUM62, but why
+not just look at the peptides directly?
+
+Indeed if we look at the frequencies of the amino acids at each position for
+the IEDB training peptides for each allotype we can see patterns by eye.
+
+In the figure below, the larger the letter the more frequently the amino acid
+appears at that peptide position. These are often called "binding motifs".
+
+We can clearly see the HLA-A\*31 has a preference for R or K at position 9, but
+looking at HLA-C\*03 and HLA-C\*015 positions 2 and 9, they both share a preference
+for A/S and L. Likewise the HLA-B allotypes also share position 9 preference for
+L.
+
+To make things worse, V, I and L are biochemically similar amino acids,
+so in the BLOSUM62 matrix there is a high likelihood of substitution one for the other at
+position 9. This means that my model will struggle to separate peptides for allotypes
+sharing this motif using amino acid frequency and substitution likelihood.
+
+```{r, pep_logos}
+
+a31 <- pep_dat %>% filter(label_chr == "A31") %>% pull(peptide)  
+b41 <- pep_dat %>% filter(label_chr == "B40") %>% pull(peptide) 
+b51 <- pep_dat %>% filter(label_chr == "B51") %>% pull(peptide) 
+c03 <- pep_dat %>% filter(label_chr == "C03") %>% pull(peptide) 
+c15 <- pep_dat %>% filter(label_chr == "C15") %>% pull(peptide) 
+
+logos <- list('HLA-A*31' = a31,
+              'HLA-B*41' = b41, 
+              'HLA-B*51' = b51,
+              'HLA-C*03' = c03,
+              'HLA-C*15' = c15)
+
+ggseqlogo(logos)
+```
+
+## Peptides NetMHC missed (only 15 out of 1000)
+
+Ultimately, I don't whether my model or NetMHC has been more accurate with
+my experimental data, but I thought it would be interesting to see if any of the experimentally 
+derived peptides that NetMHC predicts as non-binders but my model predicts as binders exist in the IEDB database. 
+
+It turns out that 15 do. Only a small number, but these may be worth further 
+investigation and indicate that NetMHC is not perfect (assuming they are true positives).
+
+As an aside it is worth noting that in immunological terms, it's not the number of
+correct identifications that is important, it's relevant identifications that matter. 
+By relevant I mean peptides that actually stimulate an immune response. This is why
+the predicted non-binders could be interesting if in fact they turned out
+to be actual binders and ones that the immune system react to.
+
+Strength of binding has been used as a surrogate for immunological relevance, but
+it's still somewhat an open question. An alternative hypothesis being that
+a continuous supply of poorly binding peptides could also stimulate the immune system.
+The rub being that this is tricky to observe.
+
+However, the main point here is that models tend to inform further investigations rather
+than end them!
+
+```{r, net_mhc_fails, echo=TRUE}
+# Find peptides observed in experiment, and predicted to bind by model, but
+# not by NetMHC and then look to see if they are in the IEDB dataset.
+validation_peps %>% 
+  filter(label_chr.y == "NB") %>% 
+  inner_join(pep_dat, by = "peptide") %>% 
+  select(peptide, model_class = label_chr.x, iedb_class = label_chr) 
+```
+
+# Further investigations
+
+Here a few ideas about what to do next, some from my presentation audience (thanks guys!)
+
++ Get more training data
++ Train the model with multiple different balanced random samples of the IEDB data
++ Try iterated cross validation
++ Add another feature i.e. binding affinity as per NetMHC
++ Compare with unsupervised learning methods e.g. clustering
+
+# Summary
+
++ You can build a deep learning model in 20 or so lines of R code.
++ Obtaining and preparing training data requires significantly more work and more code.
+
+slides: http://ab604.github.io/mhc_tensorflow_presentation.html
+
+repo: https://github.com/ab604/mhc_tensorflow
+
+email: ab604[at]soton.ac.uk
+
+twitter: [\@alistair604](https://twitter.com/alistair604)
