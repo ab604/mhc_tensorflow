@@ -17,4 +17,4 @@ This repository contains all the code and datasets.
 
 The presentation slides are here: http://ab604.github.io/mhc_tensorflow_presentation.html
 
-And the walkthrough here: 
+And the walkthrough here: http://ab604.github.io/mhc_tensorflow_notebook.html
